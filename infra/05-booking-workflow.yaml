@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Write path - booking Lambda, SQS, Step Functions state machine, EventBridge, SNS and SES (steps 10 to 22). Deploy with "sam deploy".
+
+Parameters:
+  SenderEmail:
+    Type: String
+    Description: Email address SES sends e-tickets from (it must be verified in SES).
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 15
+    MemorySize: 128
+
+Resources:
+  # ---- Queue with dead letter queue (steps 12 and 13) ----
+  BookingDlq:
+    Type: AWS::SQS::Queue
+    Properties: {MessageRetentionPeriod: 1209600}
+
+  BookingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+      RedrivePolicy: {deadLetterTargetArn: !GetAtt BookingDlq.Arn, maxReceiveCount: 3}
+
+  # ---- Lambda functions ----
+  BookingApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/lambdas/booking-api/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables: {TABLE_NAME: !ImportValue ticketing-TableName, QUEUE_URL: !Ref BookingQueue}
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !ImportValue ticketing-TableName}
+        - SQSSendMessagePolicy: {QueueName: !GetAtt BookingQueue.QueueName}
+        - {Version: "2012-10-17", Statement: [{Effect: Allow, Action: ["kms:Decrypt", "kms:GenerateDataKey"], Resource: !ImportValue ticketing-DataKeyArn}]}
+
+  StartWorkflowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/lambdas/start-workflow/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables: {STATE_MACHINE_ARN: !Ref BookingStateMachine}
+      Policies:
+        - StepFunctionsExecutionPolicy: {StateMachineName: !GetAtt BookingStateMachine.Name}
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties: {Queue: !GetAtt BookingQueue.Arn, BatchSize: 1}
+
+  ChargePaymentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/lambdas/charge-payment/
+      Handler: handler.lambda_handler
+
+  PaymentWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/lambdas/payment-webhook/
+      Handler: handler.lambda_handler
+      Policies:
+        - {Version: "2012-10-17", Statement: [{Effect: Allow, Action: ["states:SendTaskSuccess", "states:SendTaskFailure"], Resource: "*"}]}
+
+  CleanupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/lambdas/cleanup/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables: {TABLE_NAME: !ImportValue ticketing-TableName}
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !ImportValue ticketing-TableName}
+        - {Version: "2012-10-17", Statement: [{Effect: Allow, Action: ["kms:Decrypt", "kms:GenerateDataKey"], Resource: !ImportValue ticketing-DataKeyArn}]}
+      Events:
+        EveryFiveMinutes:
+          Type: ScheduleV2
+          Properties: {ScheduleExpression: "rate(5 minutes)"}
+
+  SendEmailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/lambdas/send-email/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables: {SENDER: !Ref SenderEmail}
+      Policies:
+        - {Version: "2012-10-17", Statement: [{Effect: Allow, Action: "ses:SendEmail", Resource: "*"}]}
+      Events:
+        FromTopic:
+          Type: SNS
+          Properties: {Topic: !Ref TicketTopic}
+
+  # ---- Step Functions state machine (steps 14 to 19) ----
+  BookingStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD
+      Policies:
+        - LambdaInvokePolicy: {FunctionName: !Ref ChargePaymentFunction}
+        - DynamoDBWritePolicy: {TableName: !ImportValue ticketing-TableName}
+        - {Version: "2012-10-17", Statement: [{Effect: Allow, Action: "s3:PutObject", Resource: !Join ["", [!ImportValue ticketing-TicketsBucketArn, "/*"]]}, {Effect: Allow, Action: ["kms:GenerateDataKey", "kms:Decrypt"], Resource: !ImportValue ticketing-DataKeyArn}, {Effect: Allow, Action: "events:PutEvents", Resource: "*"}]}
+      Definition:
+        StartAt: ValidateSeats
+        States:
+          ValidateSeats:
+            Type: Task
+            Resource: arn:aws:states:::dynamodb:updateItem
+            Parameters:
+              TableName: !ImportValue ticketing-TableName
+              Key:
+                pk: {"S.$": "$.eventId"}
+                sk: {"S.$": "$.seatId"}
+              UpdateExpression: SET #s = :held
+              ConditionExpression: "attribute_not_exists(#s) OR #s = :free"
+              ExpressionAttributeNames: {"#s": status}
+              ExpressionAttributeValues: {":held": {"S": HELD}, ":free": {"S": FREE}}
+            ResultPath: null
+            Catch: [{ErrorEquals: ["States.ALL"], Next: ReleaseSeat, ResultPath: "$.error"}]
+            Next: ChargePayment
+          ChargePayment:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
+            Parameters:
+              FunctionName: !GetAtt ChargePaymentFunction.Arn
+              Payload: {"taskToken.$": "$$.Task.Token", "booking.$": "$"}
+            ResultPath: null
+            TimeoutSeconds: 900
+            Catch: [{ErrorEquals: ["States.ALL"], Next: ReleaseSeat, ResultPath: "$.error"}]
+            Next: IssueTicket
+          IssueTicket:
+            Type: Task
+            Resource: arn:aws:states:::aws-sdk:s3:putObject
+            Parameters:
+              Bucket: !ImportValue ticketing-TicketsBucketName
+              "Key.$": "States.Format('{}/{}.txt', $.eventId, $.seatId)"
+              "Body.$": "States.Format('E-ticket for event {} seat {}', $.eventId, $.seatId)"
+            ResultPath: null
+            Next: PublishEvent
+          PublishEvent:
+            Type: Task
+            Resource: arn:aws:states:::events:putEvents
+            Parameters:
+              Entries:
+                - Source: ticketing.booking
+                  DetailType: TicketIssued
+                  "Detail.$": "$"
+            End: true
+          ReleaseSeat:
+            Type: Task
+            Resource: arn:aws:states:::dynamodb:updateItem
+            Parameters:
+              TableName: !ImportValue ticketing-TableName
+              Key:
+                pk: {"S.$": "$.eventId"}
+                sk: {"S.$": "$.seatId"}
+              UpdateExpression: SET #s = :free
+              ExpressionAttributeNames: {"#s": status}
+              ExpressionAttributeValues: {":free": {"S": FREE}}
+            Next: BookingFailed
+          BookingFailed:
+            Type: Fail
+            Error: BookingFailed
+            Cause: Seat unavailable or payment declined. Seat released.
+
+  # ---- EventBridge to SNS (steps 19 and 20) ----
+  TicketTopic:
+    Type: AWS::SNS::Topic
+
+  TicketTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref TicketTopic]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - {Effect: Allow, Principal: {Service: events.amazonaws.com}, Action: "sns:Publish", Resource: !Ref TicketTopic}
+
+  TicketIssuedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern: {source: [ticketing.booking], detail-type: [TicketIssued]}
+      Targets: [{Id: sns, Arn: !Ref TicketTopic}]
+
+  SesIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties: {EmailIdentity: !Ref SenderEmail}
+
+Outputs:
+  BookingApiFunctionArn:
+    Value: !GetAtt BookingApiFunction.Arn
+    Export: {Name: ticketing-BookingApiFunctionArn}
+  PaymentWebhookFunctionArn:
+    Value: !GetAtt PaymentWebhookFunction.Arn
+    Export: {Name: ticketing-PaymentWebhookFunctionArn}
+  DeadLetterQueueName:
+    Value: !GetAtt BookingDlq.QueueName
+    Export: {Name: ticketing-DlqName}

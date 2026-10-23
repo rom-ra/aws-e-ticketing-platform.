@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Security, monitoring, backup and cost - CloudTrail, GuardDuty, CloudWatch alarm, AWS Backup, Budgets.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Email that receives alarms and budget alerts.
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 50
+
+Resources:
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription: [{Protocol: email, Endpoint: !Ref AlertEmail}]
+
+  # ---- CloudTrail ----
+  TrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}}]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  TrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TrailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - {Effect: Allow, Principal: {Service: cloudtrail.amazonaws.com}, Action: "s3:GetBucketAcl", Resource: !GetAtt TrailBucket.Arn}
+          - Effect: Allow
+            Principal: {Service: cloudtrail.amazonaws.com}
+            Action: s3:PutObject
+            Resource: !Sub "${TrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition: {StringEquals: {"s3:x-amz-acl": bucket-owner-full-control}}
+
+  Trail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: TrailBucketPolicy
+    Properties:
+      IsLogging: true
+      S3BucketName: !Ref TrailBucket
+      IsMultiRegionTrail: true
+      EnableLogFileValidation: true
+
+  # ---- GuardDuty ----
+  Detector:
+    Type: AWS::GuardDuty::Detector
+    Properties: {Enable: true}
+
+  # ---- CloudWatch alarm: any message in the dead letter queue ----
+  DlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A booking message failed 3 times and landed in the dead letter queue
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{Name: QueueName, Value: !ImportValue ticketing-DlqName}]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  # ---- AWS Backup for DynamoDB ----
+  BackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties: {BackupVaultName: ticketing-vault}
+
+  BackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: ticketing-daily
+        BackupPlanRule:
+          - RuleName: daily
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: cron(0 3 * * ? *)
+            Lifecycle: {DeleteAfterDays: 35}
+
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{Effect: Allow, Principal: {Service: backup.amazonaws.com}, Action: "sts:AssumeRole"}]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup]
+
+  BackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      BackupSelection:
+        SelectionName: dynamodb-table
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources: [!ImportValue ticketing-TableArn]
+
+  # ---- Budget ----
+  Budget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit: {Amount: !Ref MonthlyBudgetUsd, Unit: USD}
+      NotificationsWithSubscribers:
+        - Notification: {NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 80}
+          Subscribers: [{SubscriptionType: EMAIL, Address: !Ref AlertEmail}]

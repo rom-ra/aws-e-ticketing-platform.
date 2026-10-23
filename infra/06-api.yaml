@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: API Gateway HTTP API with Cognito JWT authorizer (steps 5 to 10).
+
+Resources:
+  VpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties:
+      Name: ticketing-vpc-link
+      SubnetIds: [!ImportValue ticketing-PrivateSubnetA, !ImportValue ticketing-PrivateSubnetB]
+      SecurityGroupIds: [!ImportValue ticketing-AlbSecurityGroupId]
+
+  Api:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: ticketing-api
+      ProtocolType: HTTP
+      CorsConfiguration: {AllowOrigins: ["*"], AllowMethods: [GET, POST], AllowHeaders: [authorization, content-type]}
+
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties: {ApiId: !Ref Api, StageName: $default, AutoDeploy: true}
+
+  Authorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref Api
+      Name: cognito-jwt
+      AuthorizerType: JWT
+      IdentitySource: ["$request.header.Authorization"]
+      JwtConfiguration:
+        Audience: [!ImportValue ticketing-UserPoolClientId]
+        Issuer: !Sub
+          - https://cognito-idp.${AWS::Region}.amazonaws.com/${PoolId}
+          - {PoolId: !ImportValue ticketing-UserPoolId}
+
+  # GET /events -> VPC link -> ALB -> Fargate
+  EventsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref VpcLink
+      IntegrationUri: !ImportValue ticketing-ListenerArn
+      PayloadFormatVersion: "1.0"
+
+  EventsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: GET /events
+      AuthorizationType: JWT
+      AuthorizerId: !Ref Authorizer
+      Target: !Sub integrations/${EventsIntegration}
+
+  # POST /bookings -> booking-api Lambda
+  BookingIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !ImportValue ticketing-BookingApiFunctionArn
+      PayloadFormatVersion: "2.0"
+
+  BookingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: POST /bookings
+      AuthorizationType: JWT
+      AuthorizerId: !Ref Authorizer
+      Target: !Sub integrations/${BookingIntegration}
+
+  BookingPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue ticketing-BookingApiFunctionArn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/POST/bookings
+
+  # POST /payments/webhook -> payment-webhook Lambda (called by the payment provider, no JWT)
+  WebhookIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !ImportValue ticketing-PaymentWebhookFunctionArn
+      PayloadFormatVersion: "2.0"
+
+  WebhookRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: POST /payments/webhook
+      Target: !Sub integrations/${WebhookIntegration}
+
+  WebhookPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue ticketing-PaymentWebhookFunctionArn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/POST/payments/webhook
+
+Outputs:
+  ApiUrl:
+    Value: !GetAtt Api.ApiEndpoint

@@ -7,15 +7,35 @@ A serverless-first ticket booking platform. Customers browse events, sign in, bo
 ## Repository structure
 
 ```
-docs/architecture.png        Architecture diagram
-src/catalog-service/         ECS Fargate container (steps 7-9): app.py + Dockerfile
-src/lambdas/booking-api/     Steps 10-12: receive booking, save, queue
-src/lambdas/start-workflow/  Steps 13-14: SQS message starts Step Functions
-src/lambdas/payment-webhook/ Steps 16-17: payment callback
-src/lambdas/cleanup/         Timer job that releases unpaid seats
+docs/architecture.png          Architecture diagram
+infra/                         CloudFormation stacks (deploy in order, region us-east-1)
+  01-network.yaml              VPC, private subnets, VPC endpoints
+  02-data.yaml                 KMS, DynamoDB, e-ticket bucket, secret, parameter
+  03-edge-auth.yaml            S3 website, CloudFront, WAF, Cognito, optional Route 53 + ACM
+  04-catalog-service.yaml      ECR, internal ALB, ECS Fargate (steps 7-9)
+  05-booking-workflow.yaml     Lambdas, SQS + DLQ, Step Functions, EventBridge, SNS, SES (SAM)
+  06-api.yaml                  API Gateway HTTP API with Cognito JWT authorizer
+  07-ops-security.yaml         CloudTrail, GuardDuty, CloudWatch alarm, AWS Backup, Budgets
+src/catalog-service/           ECS Fargate container: app.py + Dockerfile
+src/lambdas/                   booking-api, start-workflow, charge-payment,
+                               payment-webhook, cleanup, send-email
 ```
 
-The code is intentionally simple. Each service returns a short message because the project does not process real data. The CloudFormation stack will be added in a later step.
+The source code is intentionally simple. Each service returns a short message because the project does not process real data.
+
+### Deploy order
+
+```
+aws cloudformation deploy --stack-name ticketing-network  --template-file infra/01-network.yaml
+aws cloudformation deploy --stack-name ticketing-data     --template-file infra/02-data.yaml --capabilities CAPABILITY_IAM
+aws cloudformation deploy --stack-name ticketing-edge     --template-file infra/03-edge-auth.yaml
+aws cloudformation deploy --stack-name ticketing-catalog  --template-file infra/04-catalog-service.yaml --capabilities CAPABILITY_IAM
+sam deploy --template-file infra/05-booking-workflow.yaml --stack-name ticketing-workflow --capabilities CAPABILITY_IAM --resolve-s3 --parameter-overrides SenderEmail=you@example.com
+aws cloudformation deploy --stack-name ticketing-api      --template-file infra/06-api.yaml
+aws cloudformation deploy --stack-name ticketing-ops      --template-file infra/07-ops-security.yaml --parameter-overrides AlertEmail=you@example.com
+```
+
+Push the catalog-service image to the ECR repository after stack 04 is created. The templates pass `cfn-lint` but have not been deployed.
 
 ## How to read the diagram
 

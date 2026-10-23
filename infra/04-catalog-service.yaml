@@ -1,0 +1,137 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Read path - ECR, internal ALB and ECS Fargate catalog service (steps 7 to 9).
+
+Parameters:
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Tag of the catalog-service image pushed to ECR.
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ticketing/catalog-service
+      ImageScanningConfiguration: {ScanOnPush: true}
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties: {ClusterName: ticketing-cluster}
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: {LogGroupName: /ecs/catalog-service, RetentionInDays: 14}
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB, reachable from inside the VPC only (API Gateway VPC link)
+      VpcId: !ImportValue ticketing-VpcId
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !ImportValue ticketing-VpcCidr}
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Fargate tasks, reachable from the ALB only
+      VpcId: !ImportValue ticketing-VpcId
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 8080, ToPort: 8080, SourceSecurityGroupId: !Ref AlbSecurityGroup}
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: application
+      Subnets: [!ImportValue ticketing-PrivateSubnetA, !ImportValue ticketing-PrivateSubnetB]
+      SecurityGroups: [!Ref AlbSecurityGroup]
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue ticketing-VpcId
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /health
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions: [{Type: forward, TargetGroupArn: !Ref TargetGroup}]
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{Effect: Allow, Principal: {Service: ecs-tasks.amazonaws.com}, Action: "sts:AssumeRole"}]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy]
+      Policies:
+        - PolicyName: read-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - {Effect: Allow, Action: "secretsmanager:GetSecretValue", Resource: !ImportValue ticketing-PaymentSecretArn}
+              - {Effect: Allow, Action: "kms:Decrypt", Resource: !ImportValue ticketing-DataKeyArn}
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{Effect: Allow, Principal: {Service: ecs-tasks.amazonaws.com}, Action: "sts:AssumeRole"}]
+      Policies:
+        - PolicyName: read-table
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - {Effect: Allow, Action: ["dynamodb:GetItem", "dynamodb:Query"], Resource: !ImportValue ticketing-TableArn}
+              - {Effect: Allow, Action: "kms:Decrypt", Resource: !ImportValue ticketing-DataKeyArn}
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: catalog-service
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: catalog
+          Image: !Sub "${Repository.RepositoryUri}:${ImageTag}"
+          PortMappings: [{ContainerPort: 8080}]
+          Environment: [{Name: TABLE_NAME, Value: !ImportValue ticketing-TableName}]
+          Secrets: [{Name: PAYMENT_KEY, ValueFrom: !ImportValue ticketing-PaymentSecretArn}]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: {awslogs-group: !Ref LogGroup, awslogs-region: !Ref "AWS::Region", awslogs-stream-prefix: catalog}
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      Cluster: !Ref Cluster
+      LaunchType: FARGATE
+      DesiredCount: 2
+      TaskDefinition: !Ref TaskDefinition
+      LoadBalancers: [{ContainerName: catalog, ContainerPort: 8080, TargetGroupArn: !Ref TargetGroup}]
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: [!ImportValue ticketing-PrivateSubnetA, !ImportValue ticketing-PrivateSubnetB]
+          SecurityGroups: [!Ref TaskSecurityGroup]
+
+Outputs:
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+  ListenerArn:
+    Value: !Ref Listener
+    Export: {Name: ticketing-ListenerArn}
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+    Export: {Name: ticketing-AlbSecurityGroupId}

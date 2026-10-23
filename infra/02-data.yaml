@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Data and secrets - KMS key, DynamoDB table, e-ticket bucket, secret, parameter.
+
+Resources:
+  DataKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encrypts the ticketing data
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountAdmin
+            Effect: Allow
+            Principal: {AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"}
+            Action: "kms:*"
+            Resource: "*"
+
+  TicketsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ticketing-table
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: pk, AttributeType: S}
+        - {AttributeName: sk, AttributeType: S}
+      KeySchema:
+        - {AttributeName: pk, KeyType: HASH}
+        - {AttributeName: sk, KeyType: RANGE}
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      SSESpecification: {SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref DataKey}
+      TimeToLiveSpecification: {AttributeName: expiresAt, Enabled: true}
+
+  TicketsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ticketing-etickets-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: aws:kms, KMSMasterKeyID: !GetAtt DataKey.Arn}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration: {Status: Enabled}
+
+  PaymentSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: ticketing/payment-api-key
+      Description: Placeholder payment provider key (no real value in this project)
+      SecretString: '{"apiKey":"replace-me"}'
+      KmsKeyId: !Ref DataKey
+
+  ConfigParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ticketing/seat-hold-minutes
+      Type: String
+      Value: "10"
+
+Outputs:
+  TableName:
+    Value: !Ref TicketsTable
+    Export: {Name: ticketing-TableName}
+  TableArn:
+    Value: !GetAtt TicketsTable.Arn
+    Export: {Name: ticketing-TableArn}
+  TicketsBucketName:
+    Value: !Ref TicketsBucket
+    Export: {Name: ticketing-TicketsBucketName}
+  TicketsBucketArn:
+    Value: !GetAtt TicketsBucket.Arn
+    Export: {Name: ticketing-TicketsBucketArn}
+  DataKeyArn:
+    Value: !GetAtt DataKey.Arn
+    Export: {Name: ticketing-DataKeyArn}
+  PaymentSecretArn:
+    Value: !Ref PaymentSecret
+    Export: {Name: ticketing-PaymentSecretArn}
