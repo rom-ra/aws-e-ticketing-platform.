@@ -29,7 +29,7 @@ Resources:
   BookingApiFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/lambdas/booking-api/
+      CodeUri: ../../src/lambdas/booking-api/
       Handler: handler.lambda_handler
       Environment:
         Variables: {TABLE_NAME: !ImportValue ticketing-TableName, QUEUE_URL: !Ref BookingQueue}
@@ -41,7 +41,7 @@ Resources:
   StartWorkflowFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/lambdas/start-workflow/
+      CodeUri: ../../src/lambdas/start-workflow/
       Handler: handler.lambda_handler
       Environment:
         Variables: {STATE_MACHINE_ARN: !Ref BookingStateMachine}
@@ -55,13 +55,13 @@ Resources:
   ChargePaymentFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/lambdas/charge-payment/
+      CodeUri: ../../src/lambdas/charge-payment/
       Handler: handler.lambda_handler
 
   PaymentWebhookFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/lambdas/payment-webhook/
+      CodeUri: ../../src/lambdas/payment-webhook/
       Handler: handler.lambda_handler
       Policies:
         - {Version: "2012-10-17", Statement: [{Effect: Allow, Action: ["states:SendTaskSuccess", "states:SendTaskFailure"], Resource: "*"}]}
@@ -69,7 +69,7 @@ Resources:
   CleanupFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/lambdas/cleanup/
+      CodeUri: ../../src/lambdas/cleanup/
       Handler: handler.lambda_handler
       Environment:
         Variables: {TABLE_NAME: !ImportValue ticketing-TableName}
@@ -84,7 +84,7 @@ Resources:
   SendEmailFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/lambdas/send-email/
+      CodeUri: ../../src/lambdas/send-email/
       Handler: handler.lambda_handler
       Environment:
         Variables: {SENDER: !Ref SenderEmail}
