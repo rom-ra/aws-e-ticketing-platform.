@@ -57,13 +57,22 @@ Resources:
     Properties:
       CodeUri: ../../src/lambdas/charge-payment/
       Handler: handler.lambda_handler
+      Environment:
+        Variables: {TABLE_NAME: !ImportValue ticketing-TableName}
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !ImportValue ticketing-TableName}
+        - {Version: "2012-10-17", Statement: [{Effect: Allow, Action: ["kms:Decrypt", "kms:GenerateDataKey"], Resource: !ImportValue ticketing-DataKeyArn}]}
 
   PaymentWebhookFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../../src/lambdas/payment-webhook/
       Handler: handler.lambda_handler
+      Environment:
+        Variables: {TABLE_NAME: !ImportValue ticketing-TableName}
       Policies:
+        - DynamoDBCrudPolicy: {TableName: !ImportValue ticketing-TableName}
+        - {Version: "2012-10-17", Statement: [{Effect: Allow, Action: ["kms:Decrypt", "kms:GenerateDataKey"], Resource: !ImportValue ticketing-DataKeyArn}]}
         - {Version: "2012-10-17", Statement: [{Effect: Allow, Action: ["states:SendTaskSuccess", "states:SendTaskFailure"], Resource: "*"}]}
 
   CleanupFunction:
@@ -116,9 +125,9 @@ Resources:
                 pk: {"S.$": "$.eventId"}
                 sk: {"S.$": "$.seatId"}
               UpdateExpression: SET #s = :held
-              ConditionExpression: "attribute_not_exists(#s) OR #s = :free"
+              ConditionExpression: "#s = :held"
               ExpressionAttributeNames: {"#s": status}
-              ExpressionAttributeValues: {":held": {"S": HELD}, ":free": {"S": FREE}}
+              ExpressionAttributeValues: {":held": {"S": HELD}}
             ResultPath: null
             Catch: [{ErrorEquals: ["States.ALL"], Next: ReleaseSeat, ResultPath: "$.error"}]
             Next: ChargePayment

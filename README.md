@@ -39,12 +39,13 @@ cloudformation-stack/                 One folder per stack, each with template.y
   05-booking-workflow/                Lambdas, SQS + DLQ, Step Functions, EventBridge, SNS, SES (SAM)
   06-api/                             API Gateway HTTP API with Cognito JWT authorizer
   07-ops-security/                    CloudTrail, GuardDuty, CloudWatch alarm, AWS Backup, Budgets
-src/catalog-service/                  ECS Fargate container: app.py + Dockerfile
+src/catalog-service/                  ECS Fargate container: reads events and seats from DynamoDB
 src/lambdas/                          booking-api, start-workflow, charge-payment,
                                       payment-webhook, cleanup, send-email
+src/seed/seed_events.py               Loads sample events and seats into DynamoDB
 ```
 
-The source code is intentionally simple. Each service returns a short message because the project does not process real data. Each stack folder has its own README that explains what the stack creates.
+The source code is intentionally simple. Each function does one job and talks to the AWS services shown in the diagram (DynamoDB, SQS, Step Functions, S3, SES). The payment provider is not real: the charge step only logs the request. Each stack folder has its own README that explains what the stack creates.
 
 ### Deploy order (region us-east-1)
 

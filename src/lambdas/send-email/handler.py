@@ -1,5 +1,21 @@
+"""Steps 20-21: SNS delivers the TicketIssued event. Send the e-ticket email with SES."""
+import json
+import os
+
+import boto3
+
+ses = boto3.client("sesv2")
+
+
 def lambda_handler(event, context):
-    """Steps 20-21: SNS triggers this function, which sends the e-ticket email with SES."""
-    for record in event.get("Records", []):
-        print("send-email got notification:", record["Sns"]["Message"])
-    return {"message": "E-ticket email sent"}
+    for record in event["Records"]:
+        detail = json.loads(record["Sns"]["Message"])["detail"]  # EventBridge event sent through SNS
+        ses.send_email(
+            FromEmailAddress=os.environ["SENDER"],
+            Destination={"ToAddresses": [detail["email"]]},
+            Content={"Simple": {
+                "Subject": {"Data": "Your e-ticket"},
+                "Body": {"Text": {"Data": f"Your ticket for event {detail['eventId']}, seat {detail['seatId']} is confirmed."}},
+            }},
+        )
+    return {"sent": len(event["Records"])}
