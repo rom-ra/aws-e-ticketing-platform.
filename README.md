@@ -1,6 +1,29 @@
 # E-Ticketing Platform on AWS
 
-A serverless-first ticket booking platform. Customers browse events, sign in, book a seat, pay, and receive an e-ticket by email. The design is built around the AWS Well-Architected Framework.
+## Table of contents
+
+- [Solution overview](#solution-overview)
+- [Repository structure](#repository-structure)
+  - [Deploy order (region us-east-1)](#deploy-order-region-us-east-1)
+- [How to read the diagram](#how-to-read-the-diagram)
+- [Requirements and assumptions](#requirements-and-assumptions)
+- [Request flow in detail](#request-flow-in-detail)
+- [Step Functions state machine](#step-functions-state-machine)
+- [Why each service was chosen](#why-each-service-was-chosen)
+- [Well-Architected Framework mapping](#well-architected-framework-mapping)
+
+## Solution overview
+
+This solution is an e-ticketing platform on AWS. Customers browse events and seats, sign up and sign in, book a seat, pay, and receive an e-ticket by email. The design follows the AWS Well-Architected Framework.
+
+How it works:
+
+- **Front door:** Route 53 and CloudFront, protected by WAF, serve the website from S3. Cognito handles sign-in, and API Gateway checks the sign-in token on every API call.
+- **Read path (about 90% of traffic):** event and seat lookups go through API Gateway to an internal load balancer and ECS Fargate, which reads DynamoDB through VPC endpoints. The VPC has no internet access.
+- **Write path:** a booking is saved in DynamoDB and queued in SQS. A Step Functions workflow validates the seat, charges the payment, issues the e-ticket in S3, and publishes an event. EventBridge, SNS and SES then email the ticket. If a step fails, the seat is released.
+- **Safety and operations:** KMS, CloudTrail and GuardDuty cover security. CloudWatch watches the dead letter queue, AWS Backup protects the table, and Budgets watches cost.
+
+The main requirements are a read-heavy workload, 99.9% availability, reads under 300 ms, and no double booking of a seat.
 
 ![Architecture](docs/architecture.png)
 
